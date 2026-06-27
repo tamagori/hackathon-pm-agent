@@ -3,28 +3,34 @@ name: Deploy to Cloud Run
 on:
   push:
     branches:
-      - main  # mainブランチにプッシュされたら自動起動
+      - main
 
 env:
   PROJECT_ID: ai-agent-hackathon-2026
-  GAR_LOCATION: asia-northeast1             # Artifact Registryのリージョン
-  REPOSITORY: hackathon-repo                # Artifact Registryのリポジトリ名
-  SERVICE: hackathon-pm-agent               # Cloud Runのサービス名（任意）
-  REGION: asia-northeast1                   # Cloud Runをデプロイするリージョン
+  GAR_LOCATION: asia-northeast1
+  REPOSITORY: hackathon-repo
+  SERVICE: hackathon-pm-agent
+  REGION: asia-northeast1
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    
+    # WIF連携を行うために、GitHub Actions側に一時的なトークン発行権限（id-token: write）を与えます
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # ★注意：今回は最短で開通させるため、最もシンプルな「サービスアカウントのキー」による認証を行います。
-    # 認証用の秘密鍵は後ほどGitHubのSecretsに安全に保管します。
-    - name: Google Auth
+    # ★キーレス（WIF）認証の実行ステップ
+    - name: Google Auth via WIF
       uses: google-github-actions/auth@v2
       with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
+        workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v2
