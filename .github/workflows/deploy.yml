@@ -49,5 +49,5 @@ jobs:
         gcloud run deploy ${{ env.SERVICE }} \
           --image ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE }}:${{ github.sha }} \
           --region ${{ env.REGION }} \
-          --allow-unauthenticated
+          --allow-unauthenticated \
           --service-account ${{ vars.GCP_SERVICE_ACCOUNT }}
