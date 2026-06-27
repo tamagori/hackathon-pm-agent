@@ -6,7 +6,7 @@ on:
       - main  # mainブランチにプッシュされたら自動起動
 
 env:
-  PROJECT_ID: あなたのGOOGLE_CLOUD_プロジェクトID  # ★ここをご自身のプロジェクトIDに書き換えてください
+  PROJECT_ID: ai-agent-hackathon-2026
   GAR_LOCATION: asia-northeast1             # Artifact Registryのリージョン
   REPOSITORY: hackathon-repo                # Artifact Registryのリポジトリ名
   SERVICE: hackathon-pm-agent               # Cloud Runのサービス名（任意）
