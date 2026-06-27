@@ -10,11 +10,11 @@ app = FastAPI()
 def test_gemini_connection():
     print("=== [AI Agent] Gemini APIの実装を開始します ===")
     try:
-        # Workload Identity連携（WIF）から自動で認証情報を取得
-        credentials, project_id = default()
+        # 【修正箇所】明示的にcloud-platformスコープを要求し、フィルターを解放します
+        scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+        credentials, project_id = default(scopes=scopes) # 引数にscopesを手渡す
         genai.configure(credentials=credentials)
         
-        # 最新の軽量高速モデルを呼び出し
         model = genai.GenerativeModel("gemini-2.5-flash")
         
         print("[AI Agent] Geminiに接続中...")
@@ -27,7 +27,6 @@ def test_gemini_connection():
         
     except Exception as e:
         print(f"[AI Agent] 接続テストに失敗しました。理由: {e}")
-        print("[AI Agent] 警告: Google Cloudの権限（Agent Platformユーザー）の設定が不足している可能性があります。")
 
 @app.get("/")
 def read_root():
