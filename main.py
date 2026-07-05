@@ -3,22 +3,21 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# Google ADK 関連のインポート
+# Google ADK 2.0 正しいインポートパス
 from google.adk.agents.llm_agent import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.workflows import Workflow  # 🌟 拡張性の要：Workflowをインポート
+from google.adk.workflow import Workflow  # 🌟 正解は単数形の `workflow`
 
 api = FastAPI()
 
 # ==========================================
-# 1. エージェント（ノード）の定義
+# 1. エージェントの定義
 # ==========================================
-# ① レビュー担当エージェント
 review_agent = Agent(
     model="gemini-2.5-flash",
     name="pm_review_agent",
-    description="ソースコードの差分を検出し、レビューと指摘を行う",
+    description="ソースコードをレビューし、問題点を指摘する",
     instruction="""
     あなたは優秀なプロジェクトマネージャー（PM）の相棒となるAIです。
     提供されたコード差分（Diff）をレビューし、バグやリスクがあれば、
@@ -26,67 +25,60 @@ review_agent = Agent(
     """
 )
 
-# ② Slack通知（SOS）担当エージェント
 slack_agent = Agent(
     model="gemini-2.5-flash",
     name="slack_sos_agent",
-    description="泥沼化を検知した際に、人間のPMへSOSの文章を生成する",
+    description="レビュー結果を受け取り、PM宛のエスカレーション文面を作成する",
     instruction="""
-    あなたはPMのサポートAIです。開発者が同じPRで何度も修正につまずいています。
-    人間のPM（あなたの上司）に向けて、Slackで送信するためのエスカレーション（SOS）メッセージを作成してください。
-    「至急、人間による直接のフォローアップが必要です」というニュアンスを含めてください。
+    あなたはPMのサポートAIです。
+    前のプロセス（レビュー担当AI）から、問題のあるコードの分析結果が渡されます。
+    それを受け取り、人間のPMへSlackで送信するための「至急フォローをお願いします」という
+    要約されたエスカレーション（SOS）メッセージを作成してください。
     """
 )
 
 # ==========================================
-# 2. Workflow（グラフ）の定義
+# 2. FastAPI エンドポイント
 # ==========================================
-# ※ADKのバージョンや仕様に応じて、細かなルーティング構文は調整可能ですが、
-# 今回は「状態（retry_count）に応じて動的に呼び出すエージェントを切り替える」
-# というWorkflowのオーケストレーションの基礎をRunner側で制御する確実な手法をとります。
-pm_workflow = Workflow(name="pm_review_pipeline")
-pm_workflow.add_node("ReviewStep", review_agent)
-pm_workflow.add_node("SlackSOSStep", slack_agent)
-
-
-# ==========================================
-# 3. FastAPI エンドポイント
-# ==========================================
-# テスト用に retry_count（現在のやり直し回数）を受け取れるように拡張
 class ReviewRequest(BaseModel):
     code_diff: str
-    retry_count: int = 0  # デフォルトは0（初回レビュー）
+    retry_count: int = 0
 
 @api.get("/")
 def read_root():
-    return {"message": "DevOps PM Agent (Workflow Version) is running!"}
+    return {"message": "DevOps PM Agent (ADK v2.0 Graph Engine) is running!"}
 
 @api.post("/review")
 async def run_review(request: ReviewRequest):
     try:
-        print(f"[Pipeline] リクエスト受信 (現在のやり直し回数: {request.retry_count}回)")
-        
         session_service = InMemorySessionService()
-        session_id = "hackathon-pr-session-001"
+        session_id = "hackathon-pr-session-graph"
         
-        # 🌟 条件分岐（ルーターロジック）
-        # やり直しが3回以上なら、レビューを諦めて強制的にSlack SOSエージェントへ流す
+        # 🌟 ここが ADK 2.0 の醍醐味：グラフ（エッジ）の動的構築
         if request.retry_count >= 3:
-            print("[Pipeline] ⚠️ 泥沼化を検知。Slack SOSルートへ分岐します。")
-            target_agent = slack_agent
-            prompt_text = f"以下のコード修正で{request.retry_count}回目のスタックが発生しました。SOS文を作ってください。\nコード: {request.code_diff}"
+            print("[Workflow] ⚠️ 泥沼化を検知。レビュー ➔ SOS の直列グラフを実行します。")
+            # START -> レビューAI -> SlackSOS AI へと出力を自動で受け渡すパイプライン
+            active_workflow = Workflow(
+                name="escalation_pipeline",
+                edges=[("START", review_agent, slack_agent)]
+            )
         else:
-            print("[Pipeline] 正常ルート：コードレビューを実行します。")
-            target_agent = review_agent
-            prompt_text = f"以下のコード差分をレビューしてください：\n{request.code_diff}"
+            print("[Workflow] 正常ルート：単一ノードのグラフを実行します。")
+            active_workflow = Workflow(
+                name="review_pipeline",
+                edges=[("START", review_agent)]
+            )
 
-        # 実行（Workflowのコンポーネントとして動的にAgentを呼び出す）
+        # RunnerにはAgentではなく構築したWorkflowを渡す
         runner = Runner(
-            agent=target_agent, 
+            agent=active_workflow, 
             session_service=session_service,
-            app_name="pm-workflow-app"
+            app_name="pm-workflow-platform"
         )
         
+        prompt_text = f"以下のコード差分をレビューしてください：\n{request.code_diff}"
+        
+        # ワークフローグラフの実行
         response = runner.query(
             session_id=session_id,
             text=prompt_text
@@ -94,12 +86,12 @@ async def run_review(request: ReviewRequest):
         
         return {
             "status": "success",
-            "route_taken": "Slack_SOS" if request.retry_count >= 3 else "Normal_Review",
+            "adk_version": "2.0 Graph Engine",
             "agent_response": response.text
         }
         
     except Exception as e:
-        print(f"[Pipeline] エラー: {str(e)}")
+        print(f"[Workflow] エラー: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
