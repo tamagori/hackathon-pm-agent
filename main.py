@@ -79,7 +79,7 @@ async def run_review(request: ReviewRequest):
         prompt_text = f"以下のコード差分をレビューしてください：\n{request.code_diff}"
         
         # ワークフローグラフの実行
-        response = runner.query(
+        response = runner.run(
             session_id=session_id,
             text=prompt_text
         )
