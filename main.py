@@ -1,18 +1,18 @@
 import os
-import asyncio
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 # Google ADK 関連のインポート
+from google.adk.app import App
 from google.adk.agents.llm_agent import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
-app = FastAPI()
+# FastAPIのアプリケーション
+api = FastAPI()
 
-# 1. ADKエージェントの定義（model, name, description, instruction）
-# WIFの権限（Agent Platformユーザー）があるため、APIキーなしでVertex AI経由で駆動します
+# 1. ADKエージェントの定義（スタッフ）
 review_agent = Agent(
     model="gemini-2.5-flash",
     name="pm_review_agent",
@@ -25,28 +25,38 @@ review_agent = Agent(
     """
 )
 
-# 受信データの構造（疎通確認用）
+# 2. ADKアプリケーションの定義（部署）
+adk_app = App(
+    name="pm-review-platform",
+    agents=[review_agent]
+)
+
+# 受信データの構造
 class ReviewRequest(BaseModel):
     code_diff: str
 
-@app.get("/")
+@api.get("/")
 def read_root():
-    return {"message": "Google ADK PM Agent baseline is running!"}
+    return {"message": "Google ADK PM Agent (App Structured) is running!"}
 
-@app.post("/review")
+@api.post("/review")
 async def run_review(request: ReviewRequest):
     try:
         print(f"[ADK Agent] レビューリクエストを受信しました。")
         
-        # 2. ADKのセッションサービスとランナーの初期化（プログラム実行パターン）
+        # 3. Runnerには Agent ではなく App を渡す
         session_service = InMemorySessionService()
-        runner = Runner(agent=review_agent, session_service=session_service)
+        runner = Runner(
+            app=adk_app,
+            session_service=session_service
+        )
         
-        # 3. セッションを開始してクエリを実行
         session_id = "hackathon-test-session"
-        # ADKのqueryメソッドにコード差分を投入
+        
+        # どのエージェントに処理させるかを指定して実行
         response = runner.query(
             session_id=session_id,
+            agent_name="pm_review_agent",
             text=f"以下のコード差分をレビューしてください：\n\n{request.code_diff}"
         )
         
@@ -61,4 +71,4 @@ async def run_review(request: ReviewRequest):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(api, host="0.0.0.0", port=port)
