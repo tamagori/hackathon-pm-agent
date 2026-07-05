@@ -1,4 +1,5 @@
 fastapi
 uvicorn
-google-cloud-aiplatform
+google-adk
+google-genai
 google-auth
