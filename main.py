@@ -158,7 +158,7 @@ pr_review_pipeline = Workflow(
         (
             evaluate_pm_approval,
             {
-            "approve_route": None, # 承認時は即終了（マージOK）
+            # "approve_route": None, # 承認時は即終了（マージOK）
             "reject_route": feedback_agent
             }
         ),
