@@ -249,7 +249,11 @@ async def run_review(request: ReviewRequest):
             role="user", 
             parts=[Part.from_text(text=prompt_text)]
         )
-        
+
+        is_pass = None
+        is_approved = None
+        review_reason = None
+        pm_feedback = None
         agent_response_text = ""
         
         print("[Workflow] 完全自律型ワークフローを非同期実行します...")
@@ -295,10 +299,10 @@ async def run_review(request: ReviewRequest):
             "status": "success",
             "session_id": session_id,
             "current_retry_count": latest_session.state.get("retry_count"),
-            "is_pass": latest_session.state.get("is_pass"),
-            "is_approved": latest_session.state.get("is_approved"),
-            "review_reason": latest_session.state.get("review_reason"),
-            "pm_feedback": latest_session.state.get("pm_feedback"),
+            "is_pass": is_pass,
+            "is_approved": is_approved,
+            "review_reason": review_reason,
+            "pm_feedback": pm_feedback,
             "agent_response": agent_response_text
         }
         
