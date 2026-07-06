@@ -51,6 +51,13 @@ review_agent = Agent(
     あなたは厳格かつフェアなコードレビュアーAIです。
     提供されたコード差分（Diff）をレビューしてください。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
+    【出力ルール】
+    判定結果は必ず以下のようなJSONのみで出力してください。
+    {
+      "is_pass": true,
+      "reason": "開発者への具体的なフィードバック"
+    }
+    ※これ以外の挨拶や解説文は一切不要です。
     """,
     output_schema=ReviewResultSchema,
     output_key="review_result"
@@ -65,6 +72,13 @@ pm_approval_agent = Agent(
     あなたはプロジェクトマネージャー（PM）AIです。
     AIレビューを通過したコードと理由を確認し、仕様を満たしているか判断します。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
+    【出力ルール】
+    判定結果は必ず以下のようなJSONのみで出力してください。
+    {
+      "is_approved": true,
+      "feedback": "PMとしてのフィードバック"
+    }
+    ※これ以外の挨拶や解説文は一切不要です。
     """,
     output_schema=PMApprovalSchema,
     output_key="approval_result"
@@ -245,13 +259,30 @@ async def run_review(request: ReviewRequest):
             session_id=session_id,
             new_message=new_message,
         ):
+            # イベントにテキストが含まれている場合、すべてJSONかテキストとしてチェック
+            if event.message and event.message.parts:
+                text = event.message.parts[0].text.strip()
+                
+                # 1. まずJSONとしてパースを試みる（AIの判定結果）
+                try:
+                    data = json.loads(text)
+                    if "is_pass" in data:
+                        is_pass = data["is_pass"]
+                        review_reason = data.get("reason", "")
+                    if "is_approved" in data:
+                        is_approved = data["is_approved"]
+                        pm_feedback = data.get("feedback", "")
+                    
+                    # JSONだった場合、それはエージェントの「思考結果」なので、
+                    # 最終回答には「AIが判定しました」という簡潔なテキストを入れる
+                    agent_response_text = "AIによる判定が完了しました。"
+                except json.JSONDecodeError:
+                    # 2. JSONでなければ、それは人間への説明文（agent_response）
+                    agent_response_text = text
+                    
             # 1. これが「最終回答」のイベントかどうかをチェック
             if event.is_final_response():
-                # 2. 最終回答イベントの中にメッセージがあるか安全に確認
-                if event.message and event.message.parts:
-                    # 3. 最初のパーツからテキストを取り出す
-                    agent_response_text = event.message.parts[0].text
-                    break  # 最終回答が得られたのでループを抜ける
+                break
         
         latest_session = await session_service.get_session(
             session_id=session_id,
