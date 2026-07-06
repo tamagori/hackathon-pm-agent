@@ -11,7 +11,7 @@ from google.adk.events import Event  # 静的グラフの分岐に必須
 from google.genai.types import Content, Part
 
 # --- Constants ---
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "vertex/gemini-2.5-flash"
 
 api = FastAPI()
 session_service = InMemorySessionService()
