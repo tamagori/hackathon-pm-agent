@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from google.auth import default
 from google.adk.agents.llm_agent import Agent
-from google.adk import Workflow
+from google.adk import Workflow, START
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
@@ -52,7 +52,8 @@ review_agent = Agent(
     提供されたコード差分（Diff）をレビューしてください。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
     """,
-    output_schema=ReviewResultSchema
+    output_schema=ReviewResultSchema,
+    output_key="review_result"
 )
 
 # [ノードB: PM承認]
@@ -66,6 +67,7 @@ pm_approval_agent = Agent(
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
     """,
     output_schema=PMApprovalSchema
+    output_key="approval_result"
 )
 
 # [ノードC: 担当者へ差し戻し] (ここは開発者へのメッセージなので通常のテキスト出力)
@@ -158,21 +160,30 @@ def check_risk_hedge(ctx):
 pr_review_pipeline = Workflow(
     name="advanced_pr_pipeline",
     edges=[
-        ("START", review_agent),
+        (START, review_agent),
         (review_agent, evaluate_review_result),
-        (evaluate_review_result, {
+        (
+            evaluate_review_result,
+            {
             "pass_route": pm_approval_agent,
             "fail_route": check_risk_hedge
-        }),
+            }
+        ),
         (pm_approval_agent, evaluate_pm_approval),
-        (evaluate_pm_approval, {
-            "approve_route": None, # 承認時は即終了（マージOK）
+        (
+            evaluate_pm_approval,
+            {
+            # "approve_route": None, # 承認時は即終了（マージOK）
             "reject_route": feedback_agent
-        }),
-        (check_risk_hedge, {
+            }
+        ),
+        (
+            check_risk_hedge,
+            {
             "normal_return_route": feedback_agent,
             "sos_route": slack_agent
-        })
+            }
+        )
     ]
 )
 
