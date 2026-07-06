@@ -130,12 +130,12 @@ def evaluate_review_result(ctx):
         
         # 後続ノードで使いやすいようにフラットなStateに再格納
         ctx.state["is_pass"] = is_pass
-        ctx.state["review_reason"] = reason
+        ctx.state["reason"] = reason
     except Exception as e:
         print(f"[Router Error] レビュー結果の取得に失敗、デフォルトで不合格扱いにします: {e}")
         is_pass = False
         ctx.state["is_pass"] = False
-        ctx.state["review_reason"] = "システムエラーにより判定できませんでした。"
+        ctx.state["reason"] = "システムエラーにより判定できませんでした。"
 
     if is_pass:
         yield Event(route="pass_route", payload="AIレビュー合格")
@@ -254,7 +254,7 @@ async def run_review(request: ReviewRequest):
             )
             # 既存セッションの更新
             session.state["is_deadline_tight"] = request.is_deadline_tight
-            await session_service.update_session(session)
+            await session_service.save_session(session)
         
         prompt_text = f"以下のコード差分をチェックし、ワークフローに従って対応してください：\n{request.code_diff}"
         new_message = Content(
@@ -264,8 +264,8 @@ async def run_review(request: ReviewRequest):
 
         is_pass = None
         is_approved = None
-        review_reason = None
-        pm_feedback = None
+        reason = None
+        feedback = None
         agent_response_text = ""
         
         print("[Workflow] 完全自律型ワークフローを非同期実行します...")
@@ -284,10 +284,10 @@ async def run_review(request: ReviewRequest):
                     data = json.loads(text)
                     if "is_pass" in data:
                         is_pass = data["is_pass"]
-                        review_reason = data.get("reason", "")
+                        reason = data.get("reason", "")
                     if "is_approved" in data:
                         is_approved = data["is_approved"]
-                        pm_feedback = data.get("feedback", "")
+                        feedback = data.get("feedback", "")
                     
                     # JSONだった場合、それはエージェントの「思考結果」なので、
                     # 最終回答には「AIが判定しました」という簡潔なテキストを入れる
@@ -311,10 +311,10 @@ async def run_review(request: ReviewRequest):
             "status": "success",
             "session_id": session_id,
             "current_retry_count": latest_session.state.get("retry_count"),
-            "is_pass": is_pass,
-            "is_approved": is_approved,
-            "review_reason": review_reason,
-            "pm_feedback": pm_feedback,
+            "is_pass": latest_session.state.get("is_pass"),
+            "is_approved": latest_session.state.get("is_approved"),
+            "reason": latest_session.state.get("reason"),
+            "feedback": latest_session.state.get("feedback"),
             "agent_response": agent_response_text
         }
         
