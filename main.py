@@ -99,24 +99,29 @@ async def run_review(request: ReviewRequest):
         session_id = f"github-pr-{request.pr_id}"
         user_id = "github_actions_bot"
         app_name = "pm-workflow-platform"
-        
-        # セッションを明示的に作成（必須）
-        await session_service.create_session(
-            session_id=session_id,
-            user_id=user_id,
-            app_name=app_name,
-            state={
-                "last_input": request.code_diff, 
-                "max_retries": request.max_retries
-            }
-        )
-        
+
         # ランナーの初期化
         runner = Runner(
             agent=pr_review_pipeline, 
             session_service=session_service,
             app_name=app_name
         )
+        
+        # セッションを明示的に作成（必須）
+        try:
+            session = await session_service.create_session(
+                session_id=session_id,
+                user_id=user_id,
+                app_name=app_name,
+                state={
+                    "last_input": request.code_diff, 
+                    "max_retries": request.max_retries
+                }
+            )
+        except Exception:
+            session = await session_service.get_session(
+                session_id=session_id
+            )
         
         prompt_text = f"以下のコード差分をチェックしてください：\n{request.code_diff}"
         new_message = Content(
