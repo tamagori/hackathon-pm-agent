@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from google.auth import default
 from google.adk.agents.llm_agent import Agent
-from google.adk import Workflow, START
+from google.adk.workflow import Workflow, START
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
@@ -66,7 +66,7 @@ pm_approval_agent = Agent(
     AIレビューを通過したコードと理由を確認し、仕様を満たしているか判断します。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
     """,
-    output_schema=PMApprovalSchema
+    output_schema=PMApprovalSchema,
     output_key="approval_result"
 )
 
