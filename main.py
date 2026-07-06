@@ -4,7 +4,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from google.auth import default
-import vertexai
 from google.adk.agents.llm_agent import Agent
 from google.adk import Workflow
 from google.adk.runners import Runner
@@ -17,24 +16,11 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 api = FastAPI()
 session_service = InMemorySessionService()
-
-def initialize_vertex_and_adk():
-    """Vertex AI と Google ADK 2.0 の認証・環境変数を1度だけ初期化する関数"""
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    credentials, project_id = default(scopes=scopes)
     
-    current_project = project_id or "ai-agent-hackathon-2026"
-    current_location = "asia-northeast1"
-    
-    # Vertex AI SDK の初期化
-    vertexai.init(project=current_project, location=current_location, credentials=credentials)
-    
-    # ADK 2.0 用の環境変数インジェクション
-    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-    os.environ["GOOGLE_CLOUD_PROJECT"] = current_project
-    os.environ["GOOGLE_CLOUD_LOCATION"] = current_location
-
-initialize_vertex_and_adk()
+# ADK 2.0 用の環境変数インジェクション
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+os.environ["GOOGLE_CLOUD_PROJECT"] = "ai-agent-hackathon-2026"
+os.environ["GOOGLE_CLOUD_LOCATION"] = "asia-northeast1"
 
 # --- 1. エージェントの定義 ---
 review_agent = Agent(
