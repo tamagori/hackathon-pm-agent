@@ -116,19 +116,26 @@ def evaluate_review_result(ctx):
     """【エッジ: AIの合否判定】ノードAが返したJSONを解析して分岐"""
     # ワークフローの履歴から、直前の review_agent の出力を取得
     try:
-        # ctx.history から最後のモデルの返答テキストを取得してJSONパース
-        last_turn = ctx.history[-1]
-        raw_json = last_turn.parts[0].text
-        data = json.loads(raw_json)
+        # Agentの 'output_key="review_result"' によって、
+        # すでにパース済みのオブジェクト（辞書型）が自動的に ctx.state に入っています。
+        review_data = ctx.state.get("review_result")
         
-        is_pass = data.get("is_pass", False)
-        # 後続ノードで使えるように、パースした中身をStateに保存しておく
+        # 念のため、データが取得できなかった場合のチェック
+        if review_data is None:
+            raise ValueError("review_result が state に存在しません。")
+            
+        # 構造化データ（オブジェクト）から直接値を取得
+        is_pass = review_data.get("is_pass", False)
+        reason = review_data.get("reason", "")
+        
+        # 後続ノードで使いやすいようにフラットなStateに再格納
         ctx.state["is_pass"] = is_pass
-        ctx.state["review_reason"] = data.get("reason", "")
+        ctx.state["review_reason"] = reason
     except Exception as e:
-        print(f"[Router Error] JSONパース失敗、デフォルトで不合格扱いにします: {e}")
+        print(f"[Router Error] レビュー結果の取得に失敗、デフォルトで不合格扱いにします: {e}")
         is_pass = False
         ctx.state["is_pass"] = False
+        ctx.state["review_reason"] = "システムエラーにより判定できませんでした。"
 
     if is_pass:
         yield Event(route="pass_route", payload="AIレビュー合格")
@@ -138,17 +145,22 @@ def evaluate_review_result(ctx):
 def evaluate_pm_approval(ctx):
     """【エッジ: PM承認の分岐】ノードBが返したJSONを解析して分岐"""
     try:
-        last_turn = ctx.history[-1]
-        raw_json = last_turn.parts[0].text
-        data = json.loads(raw_json)
+        approval_data = ctx.state.get("approval_result")
+        if approval_data is None:
+            raise ValueError("approval_data が state に存在しません。")
+            
+        # 構造化データ（オブジェクト）から直接値を取得
+        is_approved = approval_data.get("is_approved", False)
+        feedback = approval_data.get("feedback", "")
         
-        is_approved = data.get("is_approved", False)
+        # 後続ノードで使いやすいようにフラットなStateに再格納
         ctx.state["is_approved"] = is_approved
-        ctx.state["pm_feedback"] = data.get("feedback", "")
+        ctx.state["feedback"] = feedback
     except Exception as e:
-        print(f"[Router Error] PM JSONパース失敗、デフォルトで却下扱いにします: {e}")
-        is_approved = False
+        print(f"[Router Error] レビュー結果の取得に失敗、デフォルトで不合格扱いにします: {e}")
+        is_pass = False
         ctx.state["is_approved"] = False
+        ctx.state["feedback"] = "システムエラーにより判定できませんでした。"
 
     if is_approved:
         yield Event(route="approve_route", payload="PM承認完了")
