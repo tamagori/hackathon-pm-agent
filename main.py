@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from google.auth import default
 from google.adk.agents.llm_agent import Agent
-from google.adk.workflow import Workflow, START, END
+from google.adk.workflow import Workflow, START
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
@@ -158,7 +158,7 @@ pr_review_pipeline = Workflow(
         (
             evaluate_pm_approval,
             {
-            "approve_route": END, # 承認時は即終了（マージOK）
+            "approve_route": None, # 承認時は即終了（マージOK）
             "reject_route": feedback_agent
             }
         ),
