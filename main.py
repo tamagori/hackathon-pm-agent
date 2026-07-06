@@ -52,11 +52,7 @@ review_agent = Agent(
     提供されたコード差分（Diff）をレビューしてください。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
     """,
-    # config を使用して response_schema を指定
-    config=GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=ReviewResultSchema
-    )
+    output_schema=ReviewResultSchema
 )
 
 # [ノードB: PM承認]
@@ -69,10 +65,7 @@ pm_approval_agent = Agent(
     AIレビューを通過したコードと理由を確認し、仕様を満たしているか判断します。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
     """,
-    config=GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=PMApprovalSchema
-    )
+    output_schema=PMApprovalSchema
 )
 
 # [ノードC: 担当者へ差し戻し] (ここは開発者へのメッセージなので通常のテキスト出力)
