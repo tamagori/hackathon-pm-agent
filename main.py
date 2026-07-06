@@ -120,7 +120,9 @@ async def run_review(request: ReviewRequest):
             )
         except Exception:
             session = await session_service.get_session(
-                session_id=session_id
+                session_id=session_id,
+                user_id=user_id,
+                app_name=app_name,
             )
         
         prompt_text = f"以下のコード差分をチェックしてください：\n{request.code_diff}"
