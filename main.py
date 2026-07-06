@@ -258,17 +258,16 @@ async def run_review(request: ReviewRequest):
             user_id=user_id,
             app_name=app_name,
         )
-        latest_state = latest_session.state
-        
+
         # 最終的な回答（テキスト）を返却
         return {
             "status": "success",
             "session_id": session_id,
-            "current_retry_count": latest_state.get("retry_count"),
-            "is_pass": latest_state.get("is_pass"),
-            "is_approved": latest_state.get("is_approved"),
-            "review_reason": latest_state.get("review_reason"),
-            "pm_feedback": latest_state.get("pm_feedback"),
+            "current_retry_count": latest_session.state.get("retry_count"),
+            "is_pass": latest_session.state.get("is_pass"),
+            "is_approved": latest_session.state.get("is_approved"),
+            "review_reason": latest_session.state.get("review_reason"),
+            "pm_feedback": latest_session.state.get("pm_feedback"),
             "agent_response": agent_response_text
         }
         
