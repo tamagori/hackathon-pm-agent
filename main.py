@@ -112,57 +112,16 @@ slack_agent = Agent(
 # 3. ルーター関数の定義 (JSONをパースして完全自律化)
 # ==========================================
 
-def evaluate_review_result(ctx):
+def evaluate_review_result(output: ReviewResultSchema):
     """【エッジ: AIの合否判定】ノードAが返したJSONを解析して分岐"""
-    # ワークフローの履歴から、直前の review_agent の出力を取得
-    try:
-        # Agentの 'output_key="review_result"' によって、
-        # すでにパース済みのオブジェクト（辞書型）が自動的に ctx.state に入っています。
-        review_data = ctx.state.get("review_result")
-        
-        # 念のため、データが取得できなかった場合のチェック
-        if review_data is None:
-            raise ValueError("review_result が state に存在しません。")
-            
-        # 構造化データ（オブジェクト）から直接値を取得
-        is_pass = review_data.get("is_pass", False)
-        reason = review_data.get("reason", "")
-        
-        # 後続ノードで使いやすいようにフラットなStateに再格納
-        ctx.state["is_pass"] = is_pass
-        ctx.state["reason"] = reason
-    except Exception as e:
-        print(f"[Router Error] レビュー結果の取得に失敗、デフォルトで不合格扱いにします: {e}")
-        is_pass = False
-        ctx.state["is_pass"] = False
-        ctx.state["reason"] = "システムエラーにより判定できませんでした。"
-
-    if is_pass:
+    if output.is_pass:
         yield Event(route="pass_route", payload="AIレビュー合格")
     else:
         yield Event(route="fail_route", payload="AIレビュー不合格")
 
-def evaluate_pm_approval(ctx):
+def evaluate_pm_approval(output: PMApprovalSchema):
     """【エッジ: PM承認の分岐】ノードBが返したJSONを解析して分岐"""
-    try:
-        approval_data = ctx.state.get("approval_result")
-        if approval_data is None:
-            raise ValueError("approval_data が state に存在しません。")
-            
-        # 構造化データ（オブジェクト）から直接値を取得
-        is_approved = approval_data.get("is_approved", False)
-        feedback = approval_data.get("feedback", "")
-        
-        # 後続ノードで使いやすいようにフラットなStateに再格納
-        ctx.state["is_approved"] = is_approved
-        ctx.state["feedback"] = feedback
-    except Exception as e:
-        print(f"[Router Error] レビュー結果の取得に失敗、デフォルトで不合格扱いにします: {e}")
-        is_pass = False
-        ctx.state["is_approved"] = False
-        ctx.state["feedback"] = "システムエラーにより判定できませんでした。"
-
-    if is_approved:
+    if output.is_approved:
         yield Event(route="approve_route", payload="PM承認完了")
     else:
         yield Event(route="reject_route", payload="PM却下")
@@ -252,9 +211,6 @@ async def run_review(request: ReviewRequest):
                 user_id=user_id,
                 app_name=app_name,
             )
-            # 既存セッションの更新
-            session.state["is_deadline_tight"] = request.is_deadline_tight
-            await session_service.save_session(session)
         
         prompt_text = f"以下のコード差分をチェックし、ワークフローに従って対応してください：\n{request.code_diff}"
         new_message = Content(
@@ -282,10 +238,10 @@ async def run_review(request: ReviewRequest):
                 # 1. まずJSONとしてパースを試みる（AIの判定結果）
                 try:
                     data = json.loads(text)
-                    if "is_pass" in data:
+                    if "is_pass" in data and is_pass is None:
                         is_pass = data["is_pass"]
                         reason = data.get("reason", "")
-                    if "is_approved" in data:
+                    if "is_approved" in data and is_approved is None:
                         is_approved = data["is_approved"]
                         feedback = data.get("feedback", "")
                     
@@ -311,10 +267,10 @@ async def run_review(request: ReviewRequest):
             "status": "success",
             "session_id": session_id,
             "current_retry_count": latest_session.state.get("retry_count"),
-            "is_pass": latest_session.state.get("is_pass"),
-            "is_approved": latest_session.state.get("is_approved"),
-            "reason": latest_session.state.get("reason"),
-            "feedback": latest_session.state.get("feedback"),
+            "is_pass": is_pass,
+            "is_approved": is_approved,
+            "reason": reason,
+            "feedback": feedback,
             "agent_response": agent_response_text
         }
         
