@@ -1,7 +1,8 @@
 import os
+import json
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from google.auth import default
 from google.adk.agents.llm_agent import Agent
@@ -9,7 +10,7 @@ from google.adk import Workflow
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
-from google.genai.types import Content, Part
+from google.genai.types import Content, Part, GenerateContentConfig
 
 # --- Constants ---
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -22,100 +23,197 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 os.environ["GOOGLE_CLOUD_PROJECT"] = "ai-agent-hackathon-2026"
 os.environ["GOOGLE_CLOUD_LOCATION"] = "asia-northeast1"
 
-# --- 1. エージェントの定義 ---
+# ==========================================
+# 1. 構造化出力のための Pydantic モデル定義
+# ==========================================
+
+class ReviewResultSchema(BaseModel):
+    """ノードA (AIレビュー) の出力用スキーマ"""
+    is_pass: bool = Field(description="コードに重大な問題やバグがなければ true、修正が必要なら false")
+    reason: str = Field(description="判定に至った理由や、開発者への具体的な修正・改善のアドバイス。日本語で記入すること。")
+
+class PMApprovalSchema(BaseModel):
+    """ノードB (PM承認) の出力用スキーマ"""
+    is_approved: bool = Field(description="仕様やビジネス要件を満たしており、マージして良ければ true、却下なら false")
+    feedback: str = Field(description="PMとしてのフィードバックコメント。日本語で記入すること。")
+
+
+# ==========================================
+# 2. エージェントの定義 (Schemaを割り当て)
+# ==========================================
+
+# [ノードA: AIがレビューする]
 review_agent = Agent(
     model=GEMINI_MODEL,
-    name="pm_review_agent",
-    description="ソースコードをレビューし、問題点を指摘する",
+    name="ai_review_agent",
+    description="ソースコードをレビューし、JSON形式で合否を判定する",
     instruction="""
-    あなたは優秀なプロジェクトマネージャー（PM）の相棒となるAIです。
-    提供されたコード差分（Diff）をレビューし、バグやリスクがあれば、開発者が素直に受け取れるよう、角を立てず丁寧な言葉で指摘してください。
+    あなたは厳格かつフェアなコードレビュアーAIです。
+    提供されたコード差分（Diff）をレビューしてください。
+    指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
+    """,
+    # config を使用して response_schema を指定
+    config=GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=ReviewResultSchema
+    )
+)
+
+# [ノードB: PM承認]
+pm_approval_agent = Agent(
+    model=GEMINI_MODEL,
+    name="pm_approval_agent",
+    description="AIレビューを通過したコードに対し、仕様や要件の観点から最終承認をJSONで行う",
+    instruction="""
+    あなたはプロジェクトマネージャー（PM）AIです。
+    AIレビューを通過したコードと理由を確認し、仕様を満たしているか判断します。
+    指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
+    """,
+    config=GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=PMApprovalSchema
+    )
+)
+
+# [ノードC: 担当者へ差し戻し] (ここは開発者へのメッセージなので通常のテキスト出力)
+feedback_agent = Agent(
+    model=GEMINI_MODEL,
+    name="feedback_agent",
+    description="開発者へ差し戻しのフィードバックを作成する",
+    instruction="""
+    あなたは開発者をサポートするAIです。
+    直前のプロセスによるレビュー結果（不合格や却下理由）を受け取り、
+    開発者が次に何を修正すべきか、モチベーションを下げないように丁寧で具体的な改善案をテキストで提示してください。
     """
 )
 
+# [ノードD: SlackへSOS] (ここもSlack通知用のテキスト出力)
 slack_agent = Agent(
     model=GEMINI_MODEL,
     name="slack_sos_agent",
-    description="レビュー結果を受け取り、PM宛のエスカレーション文面を作成する",
+    description="泥沼化しているPRについて、人間のPMへエスカレーション文面を作成する",
     instruction="""
     あなたはPMのサポートAIです。
-    前のプロセス（レビュー担当AI）から、問題のあるコードの分析結果が渡されます。
-    それを受け取り、人間のPMへSlackで送信するための「至急フォローをお願いします」という
-    要約されたエスカレーション（SOS）メッセージを作成してください。
+    これまでのレビュープロセスが難航している状況を要約し、
+    人間のPMへSlackで送信するための「至急フォローをお願いします（SOS）」メッセージを作成してください。
     """
 )
 
 # ==========================================
-# 2. ルーター関数の定義（デコレータ不要）
+# 3. ルーター関数の定義 (JSONをパースして完全自律化)
 # ==========================================
-def check_retry_and_escalate(ctx):
-    """
-    セッションの状態から現在のリトライ回数と上限値を比較し、
-    次にどのエージェントを起動するかを決定するルーターノード
-    """
-    # 状態から現在のリトライ回数を取得してカウントアップ
+
+def evaluate_review_result(ctx):
+    """【エッジ: AIの合否判定】ノードAが返したJSONを解析して分岐"""
+    # ワークフローの履歴から、直前の review_agent の出力を取得
+    try:
+        # ctx.history から最後のモデルの返答テキストを取得してJSONパース
+        last_turn = ctx.history[-1]
+        raw_json = last_turn.parts[0].text
+        data = json.loads(raw_json)
+        
+        is_pass = data.get("is_pass", False)
+        # 後続ノードで使えるように、パースした中身をStateに保存しておく
+        ctx.state["is_pass"] = is_pass
+        ctx.state["review_reason"] = data.get("reason", "")
+    except Exception as e:
+        print(f"[Router Error] JSONパース失敗、デフォルトで不合格扱いにします: {e}")
+        is_pass = False
+        ctx.state["is_pass"] = False
+
+    if is_pass:
+        yield Event(route="pass_route", payload="AIレビュー合格")
+    else:
+        yield Event(route="fail_route", payload="AIレビュー不合格")
+
+def evaluate_pm_approval(ctx):
+    """【エッジ: PM承認の分岐】ノードBが返したJSONを解析して分岐"""
+    try:
+        last_turn = ctx.history[-1]
+        raw_json = last_turn.parts[0].text
+        data = json.loads(raw_json)
+        
+        is_approved = data.get("is_approved", False)
+        ctx.state["is_approved"] = is_approved
+        ctx.state["pm_feedback"] = data.get("feedback", "")
+    except Exception as e:
+        print(f"[Router Error] PM JSONパース失敗、デフォルトで却下扱いにします: {e}")
+        is_approved = False
+        ctx.state["is_approved"] = False
+
+    if is_approved:
+        yield Event(route="approve_route", payload="PM承認完了")
+    else:
+        yield Event(route="reject_route", payload="PM却下")
+
+def check_risk_hedge(ctx):
+    """【エッジ: リスクヘッジの条件分岐】リトライ回数等からSOSか通常の差し戻しか判定する"""
     current_retry = ctx.state.get("retry_count", 0) + 1
     ctx.state["retry_count"] = current_retry
-
-    input_data = ctx.state.get("last_input", "No input")
+    max_retries = ctx.state.get("max_retries", 3)
     
-    # 条件判定とルート（Event）の発行
-    if current_retry > ctx.state.get("max_retries", 3):
-        # 🌟 SOSルートへペイロードを乗せて発行
-        yield Event(route="sos_route", payload=input_data)
+    is_deadline_tight = ctx.state.get("is_deadline_tight", False)
+    
+    if current_retry >= max_retries or is_deadline_tight:
+        yield Event(route="sos_route", payload="泥沼化・強制エスカレーション")
     else:
-        # 🌟 通常ルートへペイロードを乗せて発行
-        yield Event(route="normal_route", payload=input_data)
+        yield Event(route="normal_return_route", payload="通常の差し戻し")
 
 # ==========================================
-# 3. 静的ワークフロー（Graph）の定義
+# 4. 静的ワークフロー（Graph）の定義
 # ==========================================
 pr_review_pipeline = Workflow(
-    name="pr_static_pipeline",
+    name="advanced_pr_pipeline",
     edges=[
-        # ① 開始時、まずはルーター関数で回数をチェックする
-        ("START", check_retry_and_escalate),
-        
-        # ② ルーター関数の出力（Eventのroute値）に応じて進路を分岐
-        (check_retry_and_escalate, {
-            "sos_route": slack_agent,      # 上限超過なら Slackエスカレーションへ
-            "normal_route": review_agent   # 上限未満なら レビューエージェントへ
+        ("START", review_agent),
+        (review_agent, evaluate_review_result),
+        (evaluate_review_result, {
+            "pass_route": pm_approval_agent,
+            "fail_route": check_risk_hedge
+        }),
+        (pm_approval_agent, evaluate_pm_approval),
+        (evaluate_pm_approval, {
+            "approve_route": None, # 承認時は即終了（マージOK）
+            "reject_route": feedback_agent
+        }),
+        (check_risk_hedge, {
+            "normal_return_route": feedback_agent,
+            "sos_route": slack_agent
         })
-        
-        # ※ slack_agent, review_agent 実行後は自動的にフロー終了となります
     ]
 )
 
-# 3. FastAPI エンドポイント
+# ==========================================
+# 5. FastAPI エンドポイント
+# ==========================================
 class ReviewRequest(BaseModel):
-    pr_id: str             # GitHubのPR番号などをセッションIDのベースにする
+    pr_id: str
     code_diff: str
-    max_retries: int = 3   # ユーザー設定可能なリトライ上限（デフォルト3）
+    max_retries: int = 3
+    is_deadline_tight: bool = False
 
 @api.post("/review")
 async def run_review(request: ReviewRequest):
     try:
-        # PRごとにユニークなセッションIDを作成し、過去の会話や状態（カウント）を保持
         session_id = f"github-pr-{request.pr_id}"
         user_id = "github_actions_bot"
         app_name = "pm-workflow-platform"
 
-        # ランナーの初期化
         runner = Runner(
             agent=pr_review_pipeline, 
             session_service=session_service,
             app_name=app_name
         )
         
-        # セッションを明示的に作成（必須）
         try:
             session = await session_service.create_session(
                 session_id=session_id,
                 user_id=user_id,
                 app_name=app_name,
                 state={
-                    "last_input": request.code_diff, 
-                    "max_retries": request.max_retries
+                    "max_retries": request.max_retries,
+                    "is_deadline_tight": request.is_deadline_tight,
+                    "retry_count": 0
                 }
             )
         except Exception:
@@ -124,8 +222,11 @@ async def run_review(request: ReviewRequest):
                 user_id=user_id,
                 app_name=app_name,
             )
+            # 既存セッションの更新
+            session.state["is_deadline_tight"] = request.is_deadline_tight
+            await session_service.update_session(session)
         
-        prompt_text = f"以下のコード差分をチェックしてください：\n{request.code_diff}"
+        prompt_text = f"以下のコード差分をチェックし、ワークフローに従って対応してください：\n{request.code_diff}"
         new_message = Content(
             role="user", 
             parts=[Part.from_text(text=prompt_text)]
@@ -133,7 +234,7 @@ async def run_review(request: ReviewRequest):
         
         agent_response_text = ""
         
-        print("[Workflow] 静的ワークフローを非同期実行します...")
+        print("[Workflow] 完全自律型ワークフローを非同期実行します...")
         
         async for event in runner.run_async(
             user_id=user_id,
@@ -148,10 +249,22 @@ async def run_review(request: ReviewRequest):
                     agent_response_text = event.message.parts[0].text
                     break  # 最終回答が得られたのでループを抜ける
         
+        latest_session = await session_service.get_session(
+            session_id=session_id,
+            user_id=user_id,
+            app_name=app_name,
+        )
+        latest_state = latest_session.state
+        
+        # 最終的な回答（テキスト）を返却
         return {
             "status": "success",
-            "adk_version": "2.0 Static Graph",
             "session_id": session_id,
+            "current_retry_count": latest_state.get("retry_count"),
+            "is_pass": latest_state.get("is_pass"),
+            "is_approved": latest_state.get("is_approved"),
+            "review_reason": latest_state.get("review_reason"),
+            "pm_feedback": latest_state.get("pm_feedback"),
             "agent_response": agent_response_text
         }
         
