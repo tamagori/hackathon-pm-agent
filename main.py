@@ -5,11 +5,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from google.auth import default
-from google.adk.agents.llm_agent import Agent
-from google.adk.workflow import Workflow, START
+from google.adk.events import RequestInput
+from google.adk import Agent, Context, Event, Workflow
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.events import Event
 from google.genai.types import Content, Part, GenerateContentConfig
 
 # --- Constants ---
@@ -23,26 +22,45 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 os.environ["GOOGLE_CLOUD_PROJECT"] = "ai-agent-hackathon-2026"
 os.environ["GOOGLE_CLOUD_LOCATION"] = "asia-northeast1"
 
+def node_message(node_name: str, text: str) -> str:
+    return f"[NODE] {node_name}\n{text}"
+
 # ==========================================
 # 1. 構造化出力のための Pydantic モデル定義
 # ==========================================
 
 class ReviewResultSchema(BaseModel):
-    """ノードA (AIレビュー) の出力用スキーマ"""
-    is_pass: bool = Field(description="コードに重大な問題やバグがなければ true、修正が必要なら false")
-    reason: str = Field(description="判定に至った理由や、開発者への具体的な修正・改善のアドバイス。日本語で記入すること。")
+    is_pass: bool = Field(
+        description="コードに重大な問題やバグがなければ true、修正が必要なら false"
+    )
+    review_summary: str = Field(
+        description="判定の要約。レビューを通過するかどうかの理由"
+    )
+    findings: str = Field(
+        description="具体的な指摘内容、修正すべき点、改善案"
+    )
 
-class PMApprovalSchema(BaseModel):
-    """ノードB (PM承認) の出力用スキーマ"""
-    is_approved: bool = Field(description="仕様やビジネス要件を満たしており、マージして良ければ true、却下なら false")
-    feedback: str = Field(description="PMとしてのフィードバックコメント。日本語で記入すること。")
+class AutoFixResultSchema(BaseModel):
+    fixed_code_diff: str = Field(
+        description="指摘に基づいて自動修正されたコード差分"
+    )
 
+class PMDecisionSchema(BaseModel):
+    is_approved: bool = Field(...)
+    pm_comments: str = Field(...)
+
+class ReviewResponseSchema(BaseModel):
+    status: str
+    session_id: str
+    pr_id: str
+    current_retry_count: int | None = None
+    review: dict
 
 # ==========================================
 # 2. エージェントの定義 (Schemaを割り当て)
 # ==========================================
 
-# [ノードA: AIがレビューする]
+# エージェントがコード差分をレビューする
 review_agent = Agent(
     model=GEMINI_MODEL,
     name="ai_review_agent",
@@ -52,49 +70,70 @@ review_agent = Agent(
     提供されたコード差分（Diff）をレビューしてください。
     指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
     【出力ルール】
-    判定結果は必ず以下のようなJSONのみで出力してください。
+    判定結果は必ず以下のJSONのみを出力してください。
     {
       "is_pass": true,
-      "reason": "開発者への具体的なフィードバック"
+      "review_summary": "判定理由の要約",
+      "findings": "具体的な指摘内容 / 修正案"
     }
-    ※これ以外の挨拶や解説文は一切不要です。
+    このJSON以外のテキスト（挨拶や補足説明）は一切不要です。
     """,
     output_schema=ReviewResultSchema,
-    output_key="review_result"
 )
 
-# [ノードB: PM承認]
-pm_approval_agent = Agent(
+# エージェントがコード差分を自動修正する
+auto_fix_agent = Agent(
     model=GEMINI_MODEL,
-    name="pm_approval_agent",
-    description="AIレビューを通過したコードに対し、仕様や要件の観点から最終承認をJSONで行う",
+    name="auto_fix_agent",
+    description="レビュー指摘を元にコード差分を自動修正する",
     instruction="""
-    あなたはプロジェクトマネージャー（PM）AIです。
-    AIレビューを通過したコードと理由を確認し、仕様を満たしているか判断します。
-    指定されたスキーマに従い、必ずJSONフォーマットで結果を返してください。
-    【出力ルール】
-    判定結果は必ず以下のようなJSONのみで出力してください。
+    あなたはコード修正専用のAIです。
+    提供された元のコード差分とレビュー指摘を受け取り、
+    指摘を反映した修正済みのコード差分を返してください。
+    出力は必ずJSONで、以下の形式のみを返してください。
     {
-      "is_approved": true,
-      "feedback": "PMとしてのフィードバック"
+      "fixed_code_diff": "修正済みのコード差分"
     }
-    ※これ以外の挨拶や解説文は一切不要です。
+    他のテキストは一切不要です。
     """,
-    output_schema=PMApprovalSchema,
-    output_key="approval_result"
+    output_schema=AutoFixResultSchema,
 )
 
-# [ノードC: 担当者へ差し戻し] (ここは開発者へのメッセージなので通常のテキスト出力)
-feedback_agent = Agent(
-    model=GEMINI_MODEL,
-    name="feedback_agent",
-    description="開発者へ差し戻しのフィードバックを作成する",
-    instruction="""
-    あなたは開発者をサポートするAIです。
-    直前のプロセスによるレビュー結果（不合格や却下理由）を受け取り、
-    開発者が次に何を修正すべきか、モチベーションを下げないように丁寧で具体的な改善案をテキストで提示してください。
-    """
-)
+# コード修正後の差分を更新するためのイベントを生成する関数
+def update_code_diff_after_fix(node_input: AutoFixResultSchema, ctx: Context):
+    yield Event(
+        message=node_message(
+            "update_code_diff_after_fix",
+            "auto_fix_agent の出力を state['code_diff'] に反映しました。"
+        ),
+        state={
+            "code_diff": node_input.fixed_code_diff,
+            "retry_count": 0,
+            "current_node": "update_code_diff_after_fix",
+        },
+    )
+
+# 人間のPMによる承認作業
+def request_pm_approval(ctx: Context):
+    review_summary = ctx.state["review_result"].review_summary
+    findings = ctx.state["review_result"].findings
+    code_to_approve = ctx.state.get("code_to_approve", ctx.state.get("code_diff", ""))
+
+    yield RequestInput(
+        message=node_message(
+            "request_pm_approval",
+            (
+                "以下のレビュー結果とコードを確認し、approve または reject を返してください。\n\n"
+                f"レビュー要約: {review_summary}\n"
+                f"指摘内容: {findings}\n\n"
+                "承認対象コード:\n"
+                f"{code_to_approve}\n\n"
+                "回答例:\n"
+                "- approve\n"
+                "- reject: この箇所を修正してください..."
+            )
+        )
+    )
 
 # [ノードD: SlackへSOS] (ここもSlack通知用のテキスト出力)
 slack_agent = Agent(
@@ -112,32 +151,81 @@ slack_agent = Agent(
 # 3. ルーター関数の定義 (JSONをパースして完全自律化)
 # ==========================================
 
-def evaluate_review_result(output: ReviewResultSchema):
+def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
     """【エッジ: AIの合否判定】ノードAが返したJSONを解析して分岐"""
-    if output.is_pass:
-        yield Event(route="pass_route", payload="AIレビュー合格")
+    current_retry = ctx.state.get("retry_count", 0)
+    if node_input.is_pass:
+        yield Event(
+            message=node_message(
+                "evaluate_review_result",
+                f"レビューを通過しました。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"
+                ),
+            state={
+                "review_result": node_input,
+                "retry_count": current_retry,
+                "code_to_approve": ctx.state.get("code_diff"),
+                "current_node": "evaluate_review_result",
+            },
+            route="pm_approval_route"
+            )
     else:
-        yield Event(route="fail_route", payload="AIレビュー不合格")
+        current_retry += 1
+        if current_retry > ctx.state.get("max_retries", 3):
+            yield Event(
+                message=node_message(
+                    "evaluate_review_result",
+                    f"""PMへエスカレーションします。PMと対応方法をすり合わせてください。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"""
+                ),
+                state={
+                    "review_result": node_input,
+                    "retry_count": current_retry,
+                    "current_node": "evaluate_review_result",
+                    },
+                route="sos_route"
+            )
+        else:
+            yield Event(
+                message=node_message(
+                    "evaluate_review_result",
+                    f"修正が必要です。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"
+                ),
+                state={
+                    "review_result": node_input,
+                    "retry_count": current_retry,
+                    "current_node": "evaluate_review_result",
+                },
+                route="auto_fix_route"
+            )
 
-def evaluate_pm_approval(output: PMApprovalSchema):
-    """【エッジ: PM承認の分岐】ノードBが返したJSONを解析して分岐"""
-    if output.is_approved:
-        yield Event(route="approve_route", payload="PM承認完了")
+def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
+    """【エッジ: PMの承認判定】ノードCが返したJSONを解析して分岐"""
+    if node_input.is_approved:
+        yield Event(
+            message=node_message(
+                "evaluate_pm_human_decision",
+                "PM が approve しました。ワークフローを終了します。"
+            ),
+            state={
+                "review_result": node_input,
+                "current_node": "evaluate_pm_human_decision",
+            },
+            route="pm_approval_route"
+        )
+        return  # 承認なら終了
     else:
-        yield Event(route="reject_route", payload="PM却下")
-
-def check_risk_hedge(ctx):
-    """【エッジ: リスクヘッジの条件分岐】リトライ回数等からSOSか通常の差し戻しか判定する"""
-    current_retry = ctx.state.get("retry_count", 0) + 1
-    ctx.state["retry_count"] = current_retry
-    max_retries = ctx.state.get("max_retries", 3)
-    
-    is_deadline_tight = ctx.state.get("is_deadline_tight", False)
-    
-    if current_retry >= max_retries or is_deadline_tight:
-        yield Event(route="sos_route", payload="泥沼化・強制エスカレーション")
-    else:
-        yield Event(route="normal_return_route", payload="通常の差し戻し")
+        yield Event(
+            message=node_message(
+                "evaluate_pm_human_decision",
+                f"PMから差し戻しがありました。コメント: {node_input.pm_comments}"
+            ),
+            state={
+                "retry_count": 0,
+                "pm_comments": node_input.pm_comments,
+                "code_diff": ctx.state.get("code_to_approve", ctx.state.get("code_diff")),
+                "current_node": "evaluate_pm_human_decision",
+            },
+            route="auto_fix_route"
+        )
 
 # ==========================================
 # 4. 静的ワークフロー（Graph）の定義
@@ -145,30 +233,20 @@ def check_risk_hedge(ctx):
 pr_review_pipeline = Workflow(
     name="advanced_pr_pipeline",
     edges=[
-        (START, review_agent),
-        (review_agent, evaluate_review_result),
+        # AIレビュールート
+        ("START", review_agent, evaluate_review_result),
+        # AIレビューの結果に基づいた分岐(OK：PM承認へ、NG：差し戻し or SOS)
         (
             evaluate_review_result,
             {
-            "pass_route": pm_approval_agent,
-            "fail_route": check_risk_hedge
-            }
+                "pm_approval_route": request_pm_approval,
+                "auto_fix_route": auto_fix_agent,
+                "sos_route": slack_agent,
+            },
         ),
-        (pm_approval_agent, evaluate_pm_approval),
-        (
-            evaluate_pm_approval,
-            {
-            # "approve_route": None, # 承認時は即終了（マージOK）
-            "reject_route": feedback_agent
-            }
-        ),
-        (
-            check_risk_hedge,
-            {
-            "normal_return_route": feedback_agent,
-            "sos_route": slack_agent
-            }
-        )
+        (request_pm_approval, evaluate_pm_human_decision),
+        (evaluate_pm_human_decision, {"auto_fix_route": auto_fix_agent}),
+        (auto_fix_agent, update_code_diff_after_fix, review_agent),
     ]
 )
 
@@ -176,10 +254,12 @@ pr_review_pipeline = Workflow(
 # 5. FastAPI エンドポイント
 # ==========================================
 class ReviewRequest(BaseModel):
+    # GitHub Pull Request ID
     pr_id: str
+    # コード差分
     code_diff: str
+    # レビューの最大リトライ回数
     max_retries: int = 3
-    is_deadline_tight: bool = False
 
 @api.post("/review")
 async def run_review(request: ReviewRequest):
@@ -201,8 +281,9 @@ async def run_review(request: ReviewRequest):
                 app_name=app_name,
                 state={
                     "max_retries": request.max_retries,
-                    "is_deadline_tight": request.is_deadline_tight,
-                    "retry_count": 0
+                    "retry_count": 0,
+                    "pr_id": request.pr_id,
+                    "code_diff": request.code_diff,
                 }
             )
         except Exception:
@@ -212,7 +293,12 @@ async def run_review(request: ReviewRequest):
                 app_name=app_name,
             )
         
-        prompt_text = f"以下のコード差分をチェックし、ワークフローに従って対応してください：\n{request.code_diff}"
+        prompt_text = (
+            f"下記のPR {request.pr_id} のコード差分をレビューしてください。\n"
+            "結果は必ずJSONで返してください。\n"
+            "出力項目: is_pass, review_summary, findings\n"
+            f"{request.code_diff}"
+        )
         new_message = Content(
             role="user", 
             parts=[Part.from_text(text=prompt_text)]
@@ -221,11 +307,15 @@ async def run_review(request: ReviewRequest):
         is_pass = None
         is_approved = None
         reason = None
+        findings = None
         feedback = None
         agent_response_text = ""
+        review_status = "pending"
+        next_action = "in_progress"
         
         print("[Workflow] 完全自律型ワークフローを非同期実行します...")
-        
+
+        last_node = None
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
@@ -234,16 +324,18 @@ async def run_review(request: ReviewRequest):
             # イベントにテキストが含まれている場合、すべてJSONかテキストとしてチェック
             if event.message and event.message.parts:
                 text = event.message.parts[0].text.strip()
+                last_node = text.splitlines()[0] if text.startswith("[NODE]") else last_node
                 
                 # 1. まずJSONとしてパースを試みる（AIの判定結果）
                 try:
                     data = json.loads(text)
                     if "is_pass" in data and is_pass is None:
                         is_pass = data["is_pass"]
-                        reason = data.get("reason", "")
+                        reason = data.get("review_summary", "")
+                        findings = data.get("findings", "")
                     if "is_approved" in data and is_approved is None:
                         is_approved = data["is_approved"]
-                        feedback = data.get("feedback", "")
+                        feedback = data.get("pm_comments", "")
                     
                     # JSONだった場合、それはエージェントの「思考結果」なので、
                     # 最終回答には「AIが判定しました」という簡潔なテキストを入れる
@@ -262,17 +354,33 @@ async def run_review(request: ReviewRequest):
             app_name=app_name,
         )
 
-        # 最終的な回答（テキスト）を返却
-        return {
-            "status": "success",
-            "session_id": session_id,
-            "current_retry_count": latest_session.state.get("retry_count"),
-            "is_pass": is_pass,
-            "is_approved": is_approved,
-            "reason": reason,
-            "feedback": feedback,
-            "agent_response": agent_response_text
-        }
+        if is_pass is True and is_approved is None:
+            review_status = "needs_human_review"
+            next_action = "pending_pm_approval"
+        elif is_pass is True and is_approved is True:
+            review_status = "approved"
+            next_action = "completed"
+        elif is_pass is False:
+            review_status = "needs_fix"
+            next_action = "auto_fix"
+
+        # 最終的な回答（構造化）を返却
+        return ReviewResponseSchema(
+            status="success",
+            session_id=session_id,
+            pr_id=request.pr_id,
+            current_retry_count=latest_session.state.get("retry_count"),
+            review={
+                "review_status": review_status,
+                "is_pass": is_pass,
+                "is_approved": is_approved,
+                "review_summary": reason,
+                "findings": findings or feedback,
+                "agent_response": agent_response_text,
+                "last_node": last_node,
+                "next_action": next_action,
+            },
+        )
         
     except Exception as e:
         print(f"[Workflow] エラー: {str(e)}")
