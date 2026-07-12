@@ -104,11 +104,12 @@ def update_code_diff_after_fix(node_input: AutoFixResultSchema, ctx: Context):
     yield Event(
         message=node_message(
             "update_code_diff_after_fix",
-            "auto_fix_agent の出力を state['code_diff'] に反映しました。"
+            "auto_fix_agent の出力を state['code_diff'] に反映しました。修正後のコード差分を review_agent に渡します。\n\n"
+            f"修正済みコード差分:\n{node_input.fixed_code_diff}"
         ),
         state={
+            **ctx.state,
             "code_diff": node_input.fixed_code_diff,
-            "retry_count": 0,
             "current_node": "update_code_diff_after_fix",
         },
     )
@@ -161,6 +162,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
                 f"レビューを通過しました。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"
                 ),
             state={
+                **ctx.state,
                 "review_result": node_input,
                 "retry_count": current_retry,
                 "code_to_approve": ctx.state.get("code_diff"),
@@ -177,6 +179,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
                     f"""PMへエスカレーションします。PMと対応方法をすり合わせてください。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"""
                 ),
                 state={
+                    **ctx.state,
                     "review_result": node_input,
                     "retry_count": current_retry,
                     "current_node": "evaluate_review_result",
@@ -190,6 +193,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
                     f"修正が必要です。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"
                 ),
                 state={
+                    **ctx.state,
                     "review_result": node_input,
                     "retry_count": current_retry,
                     "current_node": "evaluate_review_result",
@@ -206,6 +210,7 @@ def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
                 "PM が approve しました。ワークフローを終了します。"
             ),
             state={
+                **ctx.state,
                 "review_result": node_input,
                 "current_node": "evaluate_pm_human_decision",
             },
@@ -219,6 +224,7 @@ def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
                 f"PMから差し戻しがありました。コメント: {node_input.pm_comments}"
             ),
             state={
+                **ctx.state,
                 "retry_count": 0,
                 "pm_comments": node_input.pm_comments,
                 "code_diff": ctx.state.get("code_to_approve", ctx.state.get("code_diff")),
