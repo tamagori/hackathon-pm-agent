@@ -346,7 +346,7 @@ async def run_review(request: ReviewRequest):
                     
             # 1. これが「最終回答」のイベントかどうかをチェック
             if event.is_final_response():
-                break
+                print(f"[LOG] 途中ノードの最終応答を受信: {agent_response_text}")
         
         latest_session = await session_service.get_session(
             session_id=session_id,
