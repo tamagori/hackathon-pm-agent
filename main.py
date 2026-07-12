@@ -321,11 +321,19 @@ async def run_review(request: ReviewRequest):
             session_id=session_id,
             new_message=new_message,
         ):
-            # イベントにテキストが含まれている場合、すべてJSONかテキストとしてチェック
-            if event.message and event.message.parts:
-                text = event.message.parts[0].text.strip()
+            text = ""
+
+            # テキストが含まれるイベントだけを安全に処理
+            if event.message and getattr(event.message, "parts", None):
+                for part in event.message.parts:
+                    part_text = getattr(part, "text", None)
+                    if part_text is not None:
+                        text = part_text.strip()
+                        break
+
+            if text:
                 last_node = text.splitlines()[0] if text.startswith("[NODE]") else last_node
-                
+
                 # 1. まずJSONとしてパースを試みる（AIの判定結果）
                 try:
                     data = json.loads(text)
@@ -333,17 +341,18 @@ async def run_review(request: ReviewRequest):
                         is_pass = data["is_pass"]
                         reason = data.get("review_summary", "")
                         findings = data.get("findings", "")
+
                     if "is_approved" in data and is_approved is None:
                         is_approved = data["is_approved"]
                         feedback = data.get("pm_comments", "")
-                    
-                    # JSONだった場合、それはエージェントの「思考結果」なので、
-                    # 最終回答には「AIが判定しました」という簡潔なテキストを入れる
+
                     agent_response_text = "AIによる判定が完了しました。"
                 except json.JSONDecodeError:
-                    # 2. JSONでなければ、それは人間への説明文（agent_response）
+                    # 2. JSONでなければ、人間への説明文として扱う
                     agent_response_text = text
-                    
+            else:
+                agent_response_text = "[empty response]"
+
             # 1. これが「最終回答」のイベントかどうかをチェック
             if event.is_final_response():
                 print(f"[LOG] 途中ノードの最終応答を受信: {agent_response_text}")
