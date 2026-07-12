@@ -346,7 +346,7 @@ async def run_review(request: ReviewRequest):
                         is_approved = data["is_approved"]
                         feedback = data.get("pm_comments", "")
 
-                    agent_response_text = "AIによる判定が完了しました。"
+                    agent_response_text = f"data: {data}\n\nraw text:\n{text}"
                 except json.JSONDecodeError:
                     # 2. JSONでなければ、人間への説明文として扱う
                     agent_response_text = text
