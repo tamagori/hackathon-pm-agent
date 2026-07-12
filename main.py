@@ -161,7 +161,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
                 f"レビューを通過しました。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"
                 ),
             state={
-                "review_result": node_input,
+                "review_result": node_input.model_dump(),
                 "retry_count": current_retry,
                 "code_to_approve": ctx.state.get("code_diff"),
                 "current_node": "evaluate_review_result",
@@ -177,7 +177,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
                     f"""PMへエスカレーションします。PMと対応方法をすり合わせてください。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"""
                 ),
                 state={
-                    "review_result": node_input,
+                    "review_result": node_input.model_dump(),
                     "retry_count": current_retry,
                     "current_node": "evaluate_review_result",
                     },
@@ -190,7 +190,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
                     f"修正が必要です。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}\nレビュー対象コード: {ctx.state.get('code_diff')}"
                 ),
                 state={
-                    "review_result": node_input,
+                    "review_result": node_input.model_dump(),
                     "retry_count": current_retry,
                     "current_node": "evaluate_review_result",
                 },
@@ -206,7 +206,7 @@ def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
                 "PM が approve しました。ワークフローを終了します。"
             ),
             state={
-                "pm_review_result": node_input,
+                "pm_review_result": node_input.model_dump(),
                 "current_node": "evaluate_pm_human_decision",
             },
             route="pm_approval_route"
@@ -220,7 +220,7 @@ def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
             ),
             state={
                 "retry_count": 0,
-                "pm_review_result": node_input,
+                "pm_review_result": node_input.model_dump(),
                 "code_diff": ctx.state.get("code_to_approve", ctx.state.get("code_diff")),
                 "current_node": "evaluate_pm_human_decision",
             },
