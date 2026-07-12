@@ -187,7 +187,7 @@ def evaluate_review_result(node_input: ReviewResultSchema, ctx: Context):
             yield Event(
                 message=node_message(
                     "evaluate_review_result",
-                    f"修正が必要です。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}"
+                    f"修正が必要です。summary: {node_input.review_summary}\nレビュー内容: {node_input.findings}\nレビュー対象コード: {ctx.state.get('code_diff')}"
                 ),
                 state={
                     "review_result": node_input,
@@ -206,7 +206,7 @@ def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
                 "PM が approve しました。ワークフローを終了します。"
             ),
             state={
-                "review_result": node_input,
+                "pm_review_result": node_input,
                 "current_node": "evaluate_pm_human_decision",
             },
             route="pm_approval_route"
@@ -216,11 +216,11 @@ def evaluate_pm_human_decision(node_input: PMDecisionSchema, ctx: Context):
         yield Event(
             message=node_message(
                 "evaluate_pm_human_decision",
-                f"PMから差し戻しがありました。コメント: {node_input.pm_comments}"
+                f"PMから差し戻しがありました。\nコメント: {node_input.pm_comments}\nレビュー対象コード: {ctx.state.get('code_to_approve', ctx.state.get('code_diff'))}"
             ),
             state={
                 "retry_count": 0,
-                "pm_comments": node_input.pm_comments,
+                "pm_review_result": node_input,
                 "code_diff": ctx.state.get("code_to_approve", ctx.state.get("code_diff")),
                 "current_node": "evaluate_pm_human_decision",
             },
@@ -303,15 +303,6 @@ async def run_review(request: ReviewRequest):
             role="user", 
             parts=[Part.from_text(text=prompt_text)]
         )
-
-        is_pass = None
-        is_approved = None
-        reason = None
-        findings = None
-        feedback = None
-        agent_response_text = ""
-        review_status = "pending"
-        next_action = "in_progress"
         
         print("[Workflow] 完全自律型ワークフローを非同期実行します...")
 
@@ -334,44 +325,15 @@ async def run_review(request: ReviewRequest):
             if text:
                 last_node = text.splitlines()[0] if text.startswith("[NODE]") else last_node
 
-                # 1. まずJSONとしてパースを試みる（AIの判定結果）
-                try:
-                    data = json.loads(text)
-                    if "is_pass" in data and is_pass is None:
-                        is_pass = data["is_pass"]
-                        reason = data.get("review_summary", "")
-                        findings = data.get("findings", "")
-
-                    if "is_approved" in data and is_approved is None:
-                        is_approved = data["is_approved"]
-                        feedback = data.get("pm_comments", "")
-
-                    agent_response_text = f"data: {data}\n\nraw text:\n{text}"
-                except json.JSONDecodeError:
-                    # 2. JSONでなければ、人間への説明文として扱う
-                    agent_response_text = text
-            else:
-                agent_response_text = "[empty response]"
-
             # 1. これが「最終回答」のイベントかどうかをチェック
             if event.is_final_response():
-                print(f"[LOG] 途中ノードの最終応答を受信: {agent_response_text}")
+                print(f"[LOG] 途中ノードの最終応答を受信: {last_node}")
         
         latest_session = await session_service.get_session(
             session_id=session_id,
             user_id=user_id,
             app_name=app_name,
         )
-
-        if is_pass is True and is_approved is None:
-            review_status = "needs_human_review"
-            next_action = "pending_pm_approval"
-        elif is_pass is True and is_approved is True:
-            review_status = "approved"
-            next_action = "completed"
-        elif is_pass is False:
-            review_status = "needs_fix"
-            next_action = "auto_fix"
 
         # 最終的な回答（構造化）を返却
         return ReviewResponseSchema(
@@ -380,14 +342,13 @@ async def run_review(request: ReviewRequest):
             pr_id=request.pr_id,
             current_retry_count=latest_session.state.get("retry_count"),
             review={
-                "review_status": review_status,
-                "is_pass": is_pass,
-                "is_approved": is_approved,
-                "review_summary": reason,
-                "findings": findings or feedback,
-                "agent_response": agent_response_text,
-                "last_node": last_node,
-                "next_action": next_action,
+                "is_ai_review_passed": latest_session.state.get("review_result", {}).get("is_pass"),
+                "ai_review_summary": latest_session.state.get("review_result", {}).get("review_summary"),
+                "ai_review_findings": latest_session.state.get("review_result", {}).get("findings"),
+                "pm_review_result": latest_session.state.get("pm_review_result", {}).get("is_approved"),
+                "pm_comments": latest_session.state.get("pm_review_result", {}).get("pm_comments"),
+                "final_code_diff": latest_session.state.get("code_to_approve", latest_session.state.get("code_diff")),
+                "current_node": latest_session.state.get("current_node"),
             },
         )
         
