@@ -115,8 +115,9 @@ def update_code_diff_after_fix(node_input: AutoFixResultSchema, ctx: Context):
 
 # 人間のPMによる承認作業
 def request_pm_approval(ctx: Context):
-    review_summary = ctx.state["review_result"].review_summary
-    findings = ctx.state["review_result"].findings
+    review_result = ctx.state.get("review_result", {})
+    review_summary = review_result.get("review_summary", "")
+    findings = review_result.get("findings", "")
     code_to_approve = ctx.state.get("code_to_approve", ctx.state.get("code_diff", ""))
 
     yield RequestInput(
@@ -335,6 +336,9 @@ async def run_review(request: ReviewRequest):
             app_name=app_name,
         )
 
+        review_result = latest_session.state.get("review_result") or {}
+        pm_review_result = latest_session.state.get("pm_review_result") or {}
+
         # 最終的な回答（構造化）を返却
         return ReviewResponseSchema(
             status="success",
@@ -342,11 +346,11 @@ async def run_review(request: ReviewRequest):
             pr_id=request.pr_id,
             current_retry_count=latest_session.state.get("retry_count"),
             review={
-                "is_ai_review_passed": latest_session.state.get("review_result", {}).get("is_pass"),
-                "ai_review_summary": latest_session.state.get("review_result", {}).get("review_summary"),
-                "ai_review_findings": latest_session.state.get("review_result", {}).get("findings"),
-                "pm_review_result": latest_session.state.get("pm_review_result", {}).get("is_approved"),
-                "pm_comments": latest_session.state.get("pm_review_result", {}).get("pm_comments"),
+                "is_ai_review_passed": review_result.get("is_pass"),
+                "ai_review_summary": review_result.get("review_summary"),
+                "ai_review_findings": review_result.get("findings"),
+                "pm_review_result": pm_review_result.get("is_approved"),
+                "pm_comments": pm_review_result.get("pm_comments"),
                 "final_code_diff": latest_session.state.get("code_to_approve", latest_session.state.get("code_diff")),
                 "current_node": latest_session.state.get("current_node"),
             },
